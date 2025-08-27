@@ -1,10 +1,26 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import TaskModal from "@/components/TaskModal";
 import RecurringModal from "@/components/RecurringModal";
+import { db, signInWithGoogle, logout, onAuthStateChangedClient } from "@/components/firebase";
+import {
+  collection,
+  onSnapshot,
+  addDoc,
+  setDoc,
+  doc,
+  deleteDoc,
+  query,
+  where,
+  getDocs,
+  limit,
+} from "firebase/firestore";
+import type { User } from "firebase/auth";
 
-// Modelo de tarefa
+/* ---------------------------
+   Tipos
+   --------------------------- */
 type Task = {
   id: string;
   title: string;
@@ -20,7 +36,7 @@ type RecurringTask = {
   title: string;
   description: string;
   priority: "baixa" | "media" | "alta";
-  weekday: number; // 0 = domingo, 1 = segunda, ... 6 = sábado
+  weekday: number; // 0 = domingo ... 6 = sábado
 };
 
 type Theme = "light" | "pink" | "dark" | "terminal";
@@ -35,209 +51,294 @@ const normalizeTheme = (v: string | null): Theme => {
   return "light";
 };
 
+/* ---------------------------
+   Helpers para collections por usuário
+   --------------------------- */
+const tasksCollectionRef = (uid: string) => collection(db, "users", uid, "tasks");
+const recurringCollectionRef = (uid: string) => collection(db, "users", uid, "recurringTasks");
+
+/* ---------------------------
+   Componente
+   --------------------------- */
 export default function Home() {
+  // theme localStorage (continuei mantendo local)
   const [theme, setTheme] = useState<Theme>(() =>
-  normalizeTheme(typeof window !== "undefined" ? localStorage.getItem(THEME_KEY) : null));
+    normalizeTheme(typeof window !== "undefined" ? localStorage.getItem(THEME_KEY) : null)
+  );
+
+  // auth user
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // tasks + recurring
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [recurringTasks, setRecurringTasks] = useState<RecurringTask[]>([]);
+
+  // UI states
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isAdding, setIsAdding] = useState(false);
-
-  // const tarefas repetidas
-
-  const [recurringTasks, setRecurringTasks] = useState<RecurringTask[]>([]);
   const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
   const [editingRecurring, setEditingRecurring] = useState<RecurringTask | null>(null);
 
+  // expand control
+  const [expandedTaskKey, setExpandedTaskKey] = useState<string | null>(null);
+  const toggleExpand = (key: string) => setExpandedTaskKey((prev) => (prev === key ? null : key));
 
-
+  // Date helpers
   const formatDateForDisplay = (inputDate: string) => {
     if (!inputDate) return "";
     const [year, month, day] = inputDate.split("-");
     return `${day}/${month}/${year}`;
   };
-
-  // Data de hoje
+  const toISODate = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
   const today = new Date();
-  const formattedDate = today.toLocaleDateString("en-CA", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
+  const formattedDate = today.toLocaleDateString("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" });
 
-  // separar listas
+  // derived lists
   const todayTasks = tasks.filter((t) => t.date === formattedDate);
   const futureTasks = tasks.filter((t) => t.date > formattedDate);
-
   const completedToday = todayTasks.filter((t) => t.done).length;
   const progress = todayTasks.length > 0 ? (completedToday / todayTasks.length) * 100 : 0;
 
-  // controle de expandir tarefas -> agora usa uma "chave única"
-  const [expandedTaskKey, setExpandedTaskKey] = useState<string | null>(null);
+  /* ---------------------------
+     Auth: monitorar estado de login
+     --------------------------- */
+  useEffect(() => {
+    setAuthLoading(true);
+    const unsub = onAuthStateChangedClient((u) => {
+      setUser(u as User | null);
+      setAuthLoading(false);
+    });
+    return () => unsub();
+  }, []);
 
-  const toggleExpand = (key: string) => {
-    setExpandedTaskKey(expandedTaskKey === key ? null : key);
+  /* ---------------------------
+     Subscribes Firestore (somente quando user existe)
+     --------------------------- */
+  useEffect(() => {
+    if (!user) {
+      // limpar local state quando logout
+      setTasks([]);
+      setRecurringTasks([]);
+      return;
+    }
+
+    const tasksUnsub = onSnapshot(tasksCollectionRef(user.uid), (snap) => {
+      const items: Task[] = snap.docs.map((d) => {
+        const data = d.data() as any;
+        return {
+          id: d.id,
+          title: data.title,
+          description: data.description,
+          priority: data.priority,
+          done: data.done ?? false,
+          date: data.date,
+          recurringId: data.recurringId ?? null,
+        } as Task;
+      });
+
+      // filtrar tarefas antigas (manter hoje/futuro)
+      const todayZero = new Date();
+      todayZero.setHours(0, 0, 0, 0);
+      const filtered = items.filter((task) => {
+        const [y, m, d] = task.date.split("-").map(Number);
+        const dt = new Date(y, m - 1, d);
+        dt.setHours(0, 0, 0, 0);
+        return dt.getTime() >= todayZero.getTime();
+      });
+
+      setTasks(filtered);
+    });
+
+    const recurringUnsub = onSnapshot(recurringCollectionRef(user.uid), (snap) => {
+      const items: RecurringTask[] = snap.docs.map((d) => {
+        const data = d.data() as any;
+        return {
+          id: d.id,
+          title: data.title,
+          description: data.description,
+          priority: data.priority,
+          weekday: data.weekday,
+        } as RecurringTask;
+      });
+      setRecurringTasks(items);
+    });
+
+    return () => {
+      tasksUnsub();
+      recurringUnsub();
+    };
+  }, [user]);
+
+  /* ---------------------------
+     Firestore CRUD helpers (usando user.uid)
+     --------------------------- */
+
+  const addTask = async (payload: Omit<Task, "id" | "done">) => {
+    if (!user) throw new Error("Usuário não autenticado");
+    await addDoc(tasksCollectionRef(user.uid), { ...payload, done: false });
   };
 
-    // Carregar do localStorage ao iniciar
-    useEffect(() => {
-      const stored = localStorage.getItem("tasks");
-      if (stored) {
-        const parsed: Task[] = JSON.parse(stored) as Task[];
-    
-        // 1. Pega a data de hoje e zera as horas.
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-    
-        const filteredTasks: Task[] = parsed.filter((task) => {
-          // 2. Cria a data da tarefa com base nas partes da string,
-          //    usando o fuso horário local.
-          const [year, month, day] = task.date.split('-').map(Number);
-          const taskDate = new Date(year, month - 1, day);
-    
-          // 3. Compara se a data da tarefa é maior ou igual à de hoje.
-          return taskDate.getTime() >= today.getTime();
-        });
-    
-        const tasksWithDone: Task[] = filteredTasks.map((t) => ({
-          ...t,
-          done: t.done ?? false
-        }));
-    
-        setTasks(tasksWithDone);
-        localStorage.setItem("tasks", JSON.stringify(tasksWithDone));
-      }
-    }, []);
+  const updateTask = async (id: string, patch: Partial<Task>) => {
+    if (!user) throw new Error("Usuário não autenticado");
+    await setDoc(doc(db, "users", user.uid, "tasks", id), patch, { merge: true });
+  };
 
-    // Salva permanente o tema
+  const deleteTask = async (id: string) => {
+    if (!user) throw new Error("Usuário não autenticado");
+    await deleteDoc(doc(db, "users", user.uid, "tasks", id));
+  };
 
-    useEffect(() => {
-      document.documentElement.setAttribute("data-theme", theme);
-      localStorage.setItem(THEME_KEY, theme);
-    }, [theme]);
+  const addRecurringToDb = async (r: Omit<RecurringTask, "id">) => {
+    if (!user) throw new Error("Usuário não autenticado");
+    await addDoc(recurringCollectionRef(user.uid), r);
+  };
 
-    // Salvar no localStorage sempre que as tarefas mudarem
-    useEffect(() => {
-      localStorage.setItem("tasks", JSON.stringify(tasks));
-    }, [tasks]);
+  const updateRecurringInDb = async (id: string, patch: Partial<RecurringTask>) => {
+    if (!user) throw new Error("Usuário não autenticado");
+    await setDoc(doc(db, "users", user.uid, "recurringTasks", id), patch, { merge: true });
+  };
 
-    // carregamento das tarefas repetitivas
+  const deleteRecurringFromDb = async (id: string) => {
+    if (!user) throw new Error("Usuário não autenticado");
+    await deleteDoc(doc(db, "users", user.uid, "recurringTasks", id));
+  };
 
-        useEffect(() => {
-      const stored = localStorage.getItem("recurringTasks");
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored) as RecurringTask[];
-          setRecurringTasks(parsed);
-        } catch {
-          setRecurringTasks([]);
-        }
-      }
-    }, []);
+  /* ---------------------------
+     SYNC de recorrentes: instancia as recorrentes do dia (se ainda não existir)
+     --------------------------- */
+  const syncRecurringToToday = useCallback(async () => {
+    if (!user) return;
+    const todayDate = toISODate(new Date());
+    const todayWeekday = new Date().getDay();
 
-    // salvar recorrentes sempre que mudarem
-      useEffect(() => {
-        localStorage.setItem("recurringTasks", JSON.stringify(recurringTasks));
-      }, [recurringTasks]);
+    // ids dos recurring já instanciados hoje (a partir do state tasks)
+    const instantiatedToday = new Set(
+      tasks.filter((t) => t.date === todayDate && t.recurringId).map((t) => t.recurringId!)
+    );
 
+    const toCreate = recurringTasks.filter((r) => r.weekday === todayWeekday && !instantiatedToday.has(r.id));
+    if (toCreate.length === 0) return;
 
-      // configurações das tarefas recorrentes
-        const toISODate = (d: Date) => {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
-    };
+    // criar instâncias
+    await Promise.all(
+      toCreate.map((r) =>
+        addDoc(tasksCollectionRef(user.uid), {
+          title: r.title,
+          description: r.description,
+          priority: r.priority,
+          done: false,
+          date: todayDate,
+          recurringId: r.id,
+        })
+      )
+    );
+    // onSnapshot atualizará a lista
+  }, [recurringTasks, tasks, user]);
 
-    const syncRecurringToToday = () => {
-      const today = new Date();
-      const todayWeekday = today.getDay(); // 0..6
-      const todayDate = toISODate(today);
+  // chamar sync quando necessário
+  useEffect(() => {
+    if (!user) return;
+    const todayDate = toISODate(new Date());
+    const instantiatedToday = new Set(tasks.filter((t) => t.date === todayDate && t.recurringId).map((t) => t.recurringId!));
+    const needsSync = recurringTasks.some((r) => r.weekday === new Date().getDay() && !instantiatedToday.has(r.id));
+    if (needsSync) {
+      syncRecurringToToday().catch(console.error);
+    }
+  }, [recurringTasks, tasks, user, syncRecurringToToday]);
 
-      // ids de tasks já criadas dnesse dia
-      const existingRecurringIdsToday = new Set(
-        tasks.filter((t) => t.date === todayDate && t.recurringId).map((t) => t.recurringId!)
-      );
+  /* ---------------------------
+     Funções públicas (preservei nomes)
+     --------------------------- */
 
-      // descubra quais recorrentes se aplicam hoje e ainda não foram instanciadas
-      const toCreate = recurringTasks.filter(
-        (r) => r.weekday === todayWeekday && !existingRecurringIdsToday.has(r.id)
-      );
+  // tasks: wrapper usados pelos modais
+  const handleAddTask = async (payload: Omit<Task, "id" | "done">) => {
+    await addTask(payload);
+  };
 
-      if (toCreate.length === 0) return;
+  const handleUpdateTask = async (id: string, patch: Partial<Task>) => {
+    await updateTask(id, patch);
+  };
 
-      const newInstances: Task[] = toCreate.map((r) => ({
-        id: Date.now().toString() + "-" + Math.random().toString(36).slice(2, 6),
-        title: r.title,
-        description: r.description,
-        priority: r.priority,
-        done: false,
-        date: todayDate,
-        recurringId: r.id,
-      }));
-      setTasks((prev) => {
-        const merged = [...prev, ...newInstances];
-        return merged;
-      });
-    };
-    //
+  const handleDeleteTask = async (id: string) => {
+    await deleteTask(id);
+  };
 
-    useEffect(() => {
-      // hoje em yyyy-mm-dd (mesmo formato que toISODate)
-      const todayDate = toISODate(new Date());
-      const todayWeekday = new Date().getDay();
-    
-      // ids de recorrentes já instanciadas hoje
-      const instantiatedToday = new Set(
-        tasks
-          .filter((t) => t.date === todayDate && t.recurringId)
-          .map((t) => t.recurringId!)
-      );
-    
-      // verifica se existe pelo menos 1 recorrente do dia que ainda não foi instanciada
-      const needsSync = recurringTasks.some(
-        (r) => r.weekday === todayWeekday && !instantiatedToday.has(r.id)
-      );
-    
-      if (needsSync) {
-        // chama a função que já cria as instâncias
-        syncRecurringToToday();
-      }
-      // dependências: roda sempre que recurringTasks OU tasks mudarem
-    }, [recurringTasks, tasks]);
+  // recurring
+  const addRecurring = async (r: Omit<RecurringTask, "id">) => {
+    await addRecurringToDb(r);
+    // sync automático via useEffect
+  };
 
-    //Const de edição e criação das tarefas recorrentes
+  const editRecurring = async (updated: RecurringTask) => {
+    await updateRecurringInDb(updated.id, {
+      title: updated.title,
+      description: updated.description,
+      priority: updated.priority,
+      weekday: updated.weekday,
+    });
 
-    const addRecurring = (r: Omit<RecurringTask, "id">) => {
-      const newR: RecurringTask = { id: Date.now().toString(), ...r };
-      setRecurringTasks((prev) => [...prev, newR]);
-      // ao adicionar, sincronizamos para hoje imediatamente (caso se aplique)
-      // setTimeout para garantir que local state tenha sido atualizado
-      setTimeout(() => syncRecurringToToday(), 0);
-    };
+    // atualiza instância de hoje (opcional)
+    const todayDate = toISODate(new Date());
+    const tasksToUpdate = tasks.filter((t) => t.recurringId === updated.id && t.date === todayDate);
+    await Promise.all(tasksToUpdate.map((t) => updateTask(t.id, { title: updated.title, description: updated.description, priority: updated.priority })));
+  };
 
-    // editar (mantém id)
-    const editRecurring = (updated: RecurringTask) => {
-      setRecurringTasks((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+  const deleteRecurring = async (id: string) => {
+    await deleteRecurringFromDb(id);
+    // not deleting task-instances intentionally
+  };
 
-      const todayDate = toISODate(new Date());
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.recurringId === updated.id && t.date === todayDate ? { ...t, title: updated.title, description: updated.description, priority: updated.priority } : t
-        )
-      );
-    };
+  /* ---------------------------
+     Theme persistence (mantive)
+     --------------------------- */
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
 
-    const deleteRecurring = (id: string) => {
-      setRecurringTasks((prev) => prev.filter((r) => r.id !== id));
-    };
-
+  /* ---------------------------
+     Sign-in/out helpers (callables from JSX)
+     --------------------------- */
+  const handleSignIn = async () => {
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      console.error("Erro login:", err);
+      alert("Erro ao tentar logar. Veja console.");
+    }
+  };
+  const handleSignOut = async () => {
+    try {
+      await logout();
+      // state será limpo pelo onAuthStateChanged effect
+    } catch (err) {
+      console.error("Erro logout:", err);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-theme transition-colors duration-300 font-mono text-[var(--text-color)]">
       {/* AppBar */}
       <header className="w-full fixed top-0 left-0 header-theme p-2 z-30">
         <div className="flex items-center">
-          <div className="flex-1"></div>
+          <div className="flex-1">
+          {authLoading ? (
+            <div>carregando...</div>
+          ) : user ? (
+            <div className="flex items-center gap-3">
+              <span className="text-sm">Olá, {user.displayName || user.email}</span>
+              <button onClick={handleSignOut} className="px-3 py-1 rounded bg-gray-600">Sair</button>
+            </div>
+          ) : (
+            <button onClick={handleSignIn} className="px-3 py-1 rounded btn-theme">Entrar com Google</button>
+          )}
+          </div>
           <h1 className="text-2xl font-bold text-[var(--primary-color)]">🖥️ Lista de Tarefas</h1>
           <p className="font-bold text-white-400 flex-1 text-right">
             Estilo:
@@ -249,6 +350,7 @@ export default function Home() {
             </select>
           </p>
         </div>
+
       </header>
 
       {/* Main */}
@@ -263,45 +365,36 @@ export default function Home() {
 
         {/* Modal */}
         <TaskModal
-          isOpen={isAdding || !!editingTask}
-          onClose={() => {
-            setIsAdding(false);
-            setEditingTask(null);
-          }}
-          initialTask={editingTask || undefined}
-          onSave={(updated) => {
-            if (editingTask) {
-              // Edição
-              setTasks(prev =>
-                prev.map(task =>
-                  task.id === editingTask.id ? { ...task, ...updated } : task
-                )
-              );
-            } else {
-              // Adição
-              setTasks(prev => [
-                ...prev,
-                { ...updated, id: Date.now().toString(), done: false }
-              ]);
-            }
-            setIsAdding(false);
-            setEditingTask(null);
-          }}
-        />
+        isOpen={isAdding || !!editingTask}
+        onClose={() => { setIsAdding(false); setEditingTask(null); }}
+        initialTask={editingTask || undefined}
+        onSave={async (payload) => {
+          if (!user) { alert("Faça login para salvar tarefas."); return; }
+          if (editingTask) {
+            // editingTask exists: update
+            await handleUpdateTask(editingTask.id, payload as Partial<Task>);
+          } else {
+            await handleAddTask(payload as Omit<Task, "id" | "done">);
+          }
+          setIsAdding(false);
+          setEditingTask(null);
+        }}
+      />
 
         <RecurringModal
-          isOpen={isRecurringModalOpen}
-          onClose={() => { setIsRecurringModalOpen(false); setEditingRecurring(null); }}
-          initial={editingRecurring || undefined}
-          onSave={(payload) => {
-            if (editingRecurring) {
-              editRecurring({ id: editingRecurring.id, ...payload });
-            } else {
-              addRecurring(payload);
-            }
-            setIsRecurringModalOpen(false);
-            setEditingRecurring(null);
-          }}
+        isOpen={isRecurringModalOpen || !!editingRecurring}
+        onClose={() => { setIsRecurringModalOpen(false); setEditingRecurring(null); }}
+        initial={editingRecurring || undefined}
+        onSave={async (payload) => {
+          if (!user) { alert("Faça login para salvar recorrentes."); return; }
+          if (editingRecurring) {
+            await editRecurring({ id: editingRecurring.id, ...payload });
+          } else {
+            await addRecurring(payload);
+          }
+          setIsRecurringModalOpen(false);
+          setEditingRecurring(null);
+        }}
         />
 
         {/* HOJE */}
@@ -359,16 +452,7 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   {/* Checkbox separado */}
                   <input
-                    type="checkbox"
-                    checked={t.done}
-                    onChange={() => {
-                      const newTasks = tasks.map((task) =>
-                        `${task.date}|${task.title}` === key
-                          ? { ...task, done: !task.done }
-                          : task
-                      );
-                      setTasks(newTasks);
-                    }}
+                    type="checkbox" checked={t.done} onChange={() => handleUpdateTask(t.id, { done: !t.done })}
                     className="accent-[var(--border)] w-4 h-4 mr-2"
                   />
 
@@ -406,9 +490,7 @@ export default function Home() {
 
                   {/* Botão excluir */}
                   <button
-                    onClick={() => {
-                      setTasks(tasks.filter((task) => `${task.date}|${task.title}` !== key));
-                    }}
+                    onClick={() => handleDeleteTask(t.id)}
                     className="text-red-400 hover:text-red-600 font-bold ml-2"
                   >
                     ✕
@@ -496,7 +578,7 @@ export default function Home() {
                           ✏️
                         </button>
                         <button
-                          onClick={() => setTasks(tasks.filter((x) => x !== t))}
+                          onClick={() => handleDeleteTask(t.id)}
                           className="text-red-400 hover:text-red-600 font-bold"
                         >
                           ✕
