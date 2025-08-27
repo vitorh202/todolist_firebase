@@ -327,7 +327,7 @@ export default function Home() {
           {authLoading ? (
             <div>carregando...</div>
           ) : user ? (
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1">
               <span className="text-sm">Olá, {user.displayName || user.email}</span>
               <button onClick={handleSignOut} className="px-3 py-1 rounded bg-gray-600">Sair</button>
             </div>
@@ -335,7 +335,7 @@ export default function Home() {
             <button onClick={handleSignIn} className="px-3 py-1 rounded btn-theme">Entrar com Google</button>
           )}
           </div>
-          <h1 className="text-2xl font-bold text-[var(--primary-color)]">🖥️ Lista de Tarefas</h1>
+          <h1 className="text-2xl font-bold text-[var(--primary-color)] text-center">🖥️ Lista de Tarefas</h1>
           <p className="font-bold text-white-400 flex-1 text-right">
             Estilo:
             <select className="ml-2 rounded px-2 py-1 bg-[var(--card-bg)] border" onChange={(e) => setTheme(normalizeTheme(e.target.value))} value={theme}>
@@ -349,8 +349,10 @@ export default function Home() {
 
       </header>
 
+      <div className="pt-20"></div>
+
       {/* Main */}
-      <div className="pt-20 flex flex-col items-center px-4 min-h-screen items-center justify-center">
+      <div className="pt-20 flex flex-col items-center px-4 min-h-screen">
         {/* BOTÃO abrir modal */}
         <button
           onClick={() => setIsAdding(true)}
