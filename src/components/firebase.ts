@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from "firebase/auth";
 
 const firebaseConfig = {
     apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -27,6 +27,6 @@ export const logout = async () => {
   return signOut(auth);
 };
 
-export const onAuthStateChangedClient = (cb: (user: any) => void) => {
+export const onAuthStateChangedClient = (cb: (user: User | null) => void) => {
   return onAuthStateChanged(auth, cb);
 };

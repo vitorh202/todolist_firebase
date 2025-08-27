@@ -17,14 +17,24 @@ import type { Task, RecurringTask } from "./types";
 export function subscribeToAllTasks(onUpdate: (tasks: Task[]) => void) {
   const q = collection(db, "tasks");
   return onSnapshot(q, (snap) => {
-    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Task[];
+    const items: Task[] = snap.docs.map((d) => {
+        const data = d.data() as Partial<Task>;
+        return {
+          id: d.id,
+          title: data.title ?? "",
+          description: data.description ?? "",
+          priority: (data.priority as Task["priority"]) ?? "baixa",
+          done: data.done ?? false,
+          date: data.date ?? "",
+          recurringId: data.recurringId ?? null,
+        } as Task;
+      });
     onUpdate(items);
   });
 }
 
 export async function addTaskToDb(task: Omit<Task, "id">) {
   const ref = await addDoc(collection(db, "tasks"), task);
-  // opcional: retorna ID gerado
   return ref.id;
 }
 
@@ -40,7 +50,16 @@ export async function deleteTaskFromDb(id: string) {
 export function subscribeToRecurring(onUpdate: (items: RecurringTask[]) => void) {
   const q = collection(db, "recurringTasks");
   return onSnapshot(q, (snap) => {
-    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as RecurringTask[];
+    const items: RecurringTask[] = snap.docs.map((d) => {
+        const data = d.data() as Partial<RecurringTask>;
+        return {
+          id: d.id,
+          title: data.title ?? "",
+          description: data.description ?? "",
+          priority: (data.priority as RecurringTask["priority"]) ?? "baixa",
+          weekday: data.weekday ?? 0,
+        } as RecurringTask;
+      });
     onUpdate(items);
   });
 }

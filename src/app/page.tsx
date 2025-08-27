@@ -11,10 +11,6 @@ import {
   setDoc,
   doc,
   deleteDoc,
-  query,
-  where,
-  getDocs,
-  limit,
 } from "firebase/firestore";
 import type { User } from "firebase/auth";
 
@@ -130,7 +126,7 @@ export default function Home() {
 
     const tasksUnsub = onSnapshot(tasksCollectionRef(user.uid), (snap) => {
       const items: Task[] = snap.docs.map((d) => {
-        const data = d.data() as any;
+        const data = d.data() as Partial<Task>;
         return {
           id: d.id,
           title: data.title,
@@ -157,7 +153,7 @@ export default function Home() {
 
     const recurringUnsub = onSnapshot(recurringCollectionRef(user.uid), (snap) => {
       const items: RecurringTask[] = snap.docs.map((d) => {
-        const data = d.data() as any;
+        const data = d.data() as Partial<RecurringTask>;
         return {
           id: d.id,
           title: data.title,
